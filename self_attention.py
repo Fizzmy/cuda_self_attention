@@ -14,7 +14,7 @@ cuda_module = load(name="self_attention",
 class Attention_Layer(nn.Module):
     
     #用来实现mask-attention layer
-    def __init__(self, hidden_input_dim,hidden_output_dim,wq,wk,wv):
+    def __init__(self,hidden_input_dim,hidden_output_dim,wq,wk,wv):
         super(Attention_Layer,self).__init__()
         
         self.hidden_input_dim = hidden_input_dim
@@ -37,29 +37,31 @@ class Attention_Layer(nn.Module):
         
         #计算生成QKV矩阵
         Q = self.Q_linear(inputs) 
-        K = self.K_linear(inputs).permute(1, 0)#先进行一次转置
+        K = self.K_linear(inputs).permute(0 ,2 ,1)#先进行一次转置
         V = self.V_linear(inputs)
         # print(Q)
         #下面开始计算啦
         alpha = torch.matmul(Q, K)
         # print(alpha)
         # 下面开始softmax
-        alpha = F.softmax(alpha, dim = 1)
+        alpha = F.softmax(alpha, dim = 2)
         #print('\nalpha is :', alpha)
         
         out = torch.matmul(alpha, V)
         
         return out
-        
-leng = 500
-input_size = 1500
-output_size = 800
+
+batch_size = 16 
+leng = 128
+input_size = 512
+output_size = 256
+torch.cuda.manual_seed(0)
 torch.set_printoptions(sci_mode=False)
-inp=torch.rand((leng,input_size), device="cuda:0")
+inp=torch.rand((batch_size,leng,input_size), device="cuda:0")
 wq=torch.rand((input_size,output_size), device="cuda:0")
 wk=torch.rand((input_size,output_size), device="cuda:0")
 wv=torch.rand((input_size,output_size), device="cuda:0")
-output=torch.rand((leng,output_size), device="cuda:0")
+output=torch.rand((batch_size,leng,output_size), device="cuda:0")
 ntest = 10
 
 def show_time(func):
@@ -81,12 +83,10 @@ def run_torch():
     return att_out
 
 def run_cuda():
-    cuda_module.torch_launch_self_attention(inp,wq,wk,wv,leng,input_size,output_size,output)
+    cuda_module.torch_launch_self_attention(inp,wq,wk,wv,batch_size,leng,input_size,output_size,output)
     return output
 
 if __name__ == '__main__':
-    torch.cuda.manual_seed(0)
-
 
     print("Running cuda...")
     cuda_time , res1 = show_time(run_cuda)
