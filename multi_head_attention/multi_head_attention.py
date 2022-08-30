@@ -6,63 +6,67 @@ import numpy as np
 from torch.utils.cpp_extension import load
 import time
 
-cuda_module = load(name="self_attention",
-                   sources=["self_attention.cpp", "self_attention.cu"],
+cuda_module = load(name="multi_head_attention",
+                   sources=["multi_head_attention.cpp", "multi_head_attention.cu"],
                    verbose=True)
 
 
-class Attention_Layer(nn.Module):
+batch_size = 32
+tgt_len = 128
+head_num = 4
+hidden_size = 1024
+output_size = hidden_size // head_num
+torch.cuda.manual_seed(0)
+torch.set_printoptions(sci_mode=False)
+inp = torch.rand((batch_size,tgt_len,hidden_size), device = "cuda:0")
+qkv = torch.rand((hidden_size,3*hidden_size),device = "cuda:0")
+o = torch.rand((hidden_size,hidden_size), device = "cuda:0")
+
+
+output = torch.rand((batch_size,tgt_len,head_num,output_size), device = "cuda:0")
+ntest = 10
+
+class MultiHeadAttentionLayer(nn.Module):
     
     #用来实现mask-attention layer
-    def __init__(self,hidden_input_dim,hidden_output_dim,wq,wk,wv):
-        super(Attention_Layer,self).__init__()
+    def __init__(self,head_num,hidden_size,qkv,o):
+        super(MultiHeadAttentionLayer,self).__init__()
         
-        self.hidden_input_dim = hidden_input_dim
+        self.hidden_size = hidden_size
 
-        self.hidden_output_dim = hidden_output_dim
+        self.head_num = head_num
         
         #下面使用nn的Linear层来定义Q，K，V矩阵
-        self.Q_linear = nn.Linear(hidden_input_dim, hidden_output_dim, bias = False)
-        #mid=torch.rand(hidden_output_dim,hidden_input_dim)
-        self.Q_linear.weight=Parameter(wq.permute(1, 0))
-        self.K_linear = nn.Linear(hidden_input_dim, hidden_output_dim, bias = False)
-        #mid=torch.rand(hidden_output_dim,hidden_input_dim)
-        self.K_linear.weight=Parameter(wk.permute(1, 0))
-        self.V_linear = nn.Linear(hidden_input_dim, hidden_output_dim, bias = False)
-        #mid=torch.rand(hidden_output_dim,hidden_input_dim)
-        self.V_linear.weight=Parameter(wv.permute(1, 0))
+        self.QKV_linear = nn.Linear(hidden_size, 3 * hidden_size, bias = False)
+        self.QKV_linear.weight=Parameter(qkv.permute(1, 0))
+        self.O_linear = nn.Linear(hidden_size, hidden_size, bias = False)
+        self.O_linear.weight=Parameter(o.permute(1, 0))
             
         
     def forward(self, inputs):
         
+        batch_size , tgt_len , hidden_size =inputs.size()
         #计算生成QKV矩阵
-        Q = self.Q_linear(inputs) 
-        K = self.K_linear(inputs).permute(0 ,2 ,1)#先进行一次转置
-        V = self.V_linear(inputs)
-        # print(Q)
-        #下面开始计算啦
-        alpha = torch.matmul(Q, K)
-        # print(alpha)
-        # 下面开始softmax
-        alpha = F.softmax(alpha, dim = 2)
-        #print('\nalpha is :', alpha)
-        
-        out = torch.matmul(alpha, V)
-        
-        return out
+        QKV = self.QKV_linear(inputs) 
+        # print(QKV)
+        QKV = QKV.view(batch_size, tgt_len , 3 ,head_num , hidden_size//head_num ).permute(2,0,3,1,4).contiguous().view(3,-1, tgt_len, output_size)
+        Q = QKV[0]
+        K = QKV[1]
+        V = QKV[2]
 
-batch_size = 16 
-leng = 128
-input_size = 512
-output_size = 256
-torch.cuda.manual_seed(0)
-torch.set_printoptions(sci_mode=False)
-inp=torch.rand((batch_size,leng,input_size), device="cuda:0")
-wq=torch.rand((input_size,output_size), device="cuda:0")
-wk=torch.rand((input_size,output_size), device="cuda:0")
-wv=torch.rand((input_size,output_size), device="cuda:0")
-output=torch.rand((batch_size,leng,output_size), device="cuda:0")
-ntest = 10
+        QK = torch.bmm(Q , K.contiguous().permute(0,2,1)).view(-1,tgt_len,tgt_len)
+        
+        QK = QK / np.power(hidden_size//head_num,0.5)
+
+        QK = F.softmax( QK , dim = 2)
+        
+        output = torch.bmm(QK , V).view( -1 , head_num , tgt_len , output_size).permute(0,2,1,3).contiguous().view( -1 , tgt_len , hidden_size)
+        # print(torch.bmm(QK , V))
+        output= self.O_linear(output)
+
+        return output.view(-1,tgt_len,head_num,output_size)
+
+att_L = MultiHeadAttentionLayer(head_num,hidden_size,qkv,o)
 
 def show_time(func):
     times = list()
@@ -78,12 +82,12 @@ def show_time(func):
     return times , res
 
 def run_torch():
-    att_L = Attention_Layer(input_size,output_size,wq,wk,wv)
+
     att_out = att_L(inp)
     return att_out
 
 def run_cuda():
-    cuda_module.torch_launch_self_attention(inp,wq,wk,wv,batch_size,leng,input_size,output_size,output)
+    cuda_module.torch_launch_multi_head_attention(inp,qkv,o,batch_size,tgt_len,head_num,hidden_size,output)
     return output
 
 if __name__ == '__main__':
@@ -96,5 +100,6 @@ if __name__ == '__main__':
     torch_time , res2 = show_time(run_torch)
     print("Torch time:  {:.3f}us".format(np.mean(torch_time)))
 
+    # print(res1[0])
     np.testing.assert_allclose(res1[0].cpu().numpy(), res2[0].cpu().detach().numpy(), rtol=1e-4)
     

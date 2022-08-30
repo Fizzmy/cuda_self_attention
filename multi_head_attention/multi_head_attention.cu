@@ -4,9 +4,11 @@
 #include <stdlib.h>
 #include <time.h>
 #include <cuda_runtime.h>
+#include <stdexcept>
+#include <math.h>
 #define TILE_WIDTH 32
+#define MAX_THREADS 1024
 #define EE float(2.71828182845904523536)
-void launch_self_attention(float* input,float* wq,float* wk, float* wv,int len,int input_size,int output_size,float* output);
 __global__ void MatrixMulKernel(float* M,float* N, float* P, int m ,int n, int k)
 {
     __shared__ float ds_M[TILE_WIDTH][TILE_WIDTH];
@@ -75,82 +77,62 @@ void launch_matrixT(float *input,float *output,int batch_size,int m,int n) {
     MatrixTKernel<<<grid, block>>>(input,output,m,n);
 }
 
-__global__ void ReduceMaxKernel(float *input,float *output,int m,int n) // m*n
+__global__ void SoftmaxKernel(float *input,int tgt_len,float *output,float scale) // m*n
 {
-    __shared__ float ds[TILE_WIDTH*TILE_WIDTH];
+    __shared__ float ds[MAX_THREADS];
 
     int tid = threadIdx.x;
-    int base = blockIdx.y * n + blockIdx.x * m * n;
+    int base = blockIdx.x * tgt_len;
     //int baseInput = ;
     //int baseOutput = blockIdx.x * m ;
-    for (int j=tid;j<n;j+=blockDim.x)
+    float outp;
+    if (tid < tgt_len)
     {
-        if (j < blockDim.x)
-        {
-            ds[tid] = input[ base + j ];
-            //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
-        }
-        else if (input[base+j] > ds[tid])
-            ds[tid] = input[ base + j ];
+        outp = input[ base + tid ] * scale;
+        ds[tid] = outp;
+        //printf("%.3f %.3f\n",scale,input[ base + tid ] * scale);
     }
+        //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
     __syncthreads();
 
     for(int s = blockDim.x/2; s > 0; s>>=1){   
-        if(tid < s && tid + s < n){
+        if(tid < s && tid + s < tgt_len){
             if (ds[tid] < ds[tid + s])
                 ds[tid] = ds[tid + s];
             //printf("%d %.3f\n",s,ds[tid]);
         }
         __syncthreads();
     }
-
-    if(tid == 0){
-        output[blockIdx.x * m + blockIdx.y] = ds[0];
-    }
-}
-__global__ void BroadCastSubExpKernel(float *input,float *reduceMax,float *output,int m,int n)
-{
-    __shared__ float maxn;
-    int tid = threadIdx.x;
-    int base = blockIdx.y * n + blockIdx.x * m * n;
-    if (tid==0) maxn=reduceMax[blockIdx.x * m + blockIdx.y];
+    
+    float maxn = ds[0];
+    
     __syncthreads();
-    for (int j=tid;j<n;j+=blockDim.x)
-        output[base +j] = powf(EE,input[base + j]-maxn);
-}
-__global__ void ReduceSumKernel(float *input,float *output,int m,int n) // m*n
-{
-    __shared__ float ds[TILE_WIDTH*TILE_WIDTH];
-    unsigned int tid = threadIdx.x;
-    unsigned int base = blockIdx.x * n * m + blockIdx.y * n;
-    for (int j=tid;j<n;j+=blockDim.x)
+
+    if (tid < tgt_len)
     {
-        if (j < blockDim.x)
-            ds[tid] = input[ base + j ];
-        else ds[tid] += input[ base + j ];
+        //printf("%f %f %f\n",maxn,expf(input[ base + tid ] * scale - maxn ),ds[tid]);
+        outp = expf(outp-maxn);
+        ds[tid] = outp;
     }
+        //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
     __syncthreads();
 
     for(int s = blockDim.x/2; s > 0; s>>=1){   
-        if(tid < s && tid + s < n){
+        if(tid < s && tid + s < tgt_len){
             ds[tid] += ds[tid + s];
+            //printf("%d %.3f\n",s,ds[tid]);
         }
         __syncthreads();
     }
 
-    if(tid == 0){
-        output[blockIdx.x * m + blockIdx.y] = ds[0];
+    maxn = ds[0];
+    
+    if (tid < tgt_len)
+    {
+        //printf("%f\n",maxn);
+        output[ base + tid ] = outp/maxn;
     }
-}
-__global__ void DivKernel(float *input,float *reduceSum,float *output,int m,int n)
-{
-    __shared__ float sum;
-    unsigned int tid = threadIdx.x;
-    unsigned int base = blockIdx.x * n * m + blockIdx.y * n;
-    if (tid==0) sum=reduceSum[blockIdx.x * m + blockIdx.y];
-    __syncthreads();
-    for (int j=tid;j<n;j+=blockDim.x)
-        output[base+j] = input[base+j]/sum;
+
 }
 
 __global__ void PrintKernel(float *input,int m,int n) // m*n
@@ -171,92 +153,173 @@ void print(float *c,int batch_size,int m,int n)
     PrintKernel<<<grid, block>>>(c,m,n);
 }
 
-void launch_softmax(float *input,float *output,int batch_size, int m,int n){
+void launch_softmax(float *input,int batch_size,int tgt_len,float *output,float scale){
 
-    dim3 grid(batch_size,m);
-    dim3 block(TILE_WIDTH*TILE_WIDTH);
-    float *reduceMax,*exp,*reduceSum;
-    cudaMalloc((void**)&reduceMax,batch_size * m * sizeof(float));
-    cudaMalloc((void**)&exp,batch_size * m * n * sizeof(float));
-    cudaMalloc((void**)&reduceSum,batch_size * m * sizeof(float));
-    ReduceMaxKernel<<<grid,block>>>(input,reduceMax,m,n);
-    cudaThreadSynchronize();
-    //print(input,batch_size,m,n);
-    //print(reduceMax,batch_size,m,1);
-    BroadCastSubExpKernel<<<grid,block>>>(input,reduceMax,exp,m,n);
-    cudaThreadSynchronize();
-    cudaFree(reduceMax);
-    ReduceSumKernel<<<grid,block>>>(exp,reduceSum,m,n);
-    cudaThreadSynchronize();
-    DivKernel<<<grid,block>>>(exp,reduceSum,output,m,n);
-    cudaThreadSynchronize();
-    cudaFree(exp);
-    cudaFree(reduceSum);
-}
-__global__ void BroadcastKernel(float *input,float *batch_input,int m,int n)
-{
-    int base=blockIdx.x * m * n;
-    int bx = blockIdx.y; int by = blockIdx.z;
-    int tx = threadIdx.x; int ty = threadIdx.y;
-    int Row = bx * blockDim.x + tx;
-    int Col = by * blockDim.y + ty;
-    if (Row<m && Col<n)
-        batch_input[base + Row *n + Col] = input[ Row * n + Col];
-}
-void launch_broadcast(float *input,float *batch_input,float batch_size,int m,int n)
-{
-    dim3 grid(batch_size,(m+TILE_WIDTH-1)/TILE_WIDTH,(n+TILE_WIDTH-1)/TILE_WIDTH);
-    dim3 block(TILE_WIDTH,TILE_WIDTH); 
-    BroadcastKernel<<<grid,block>>>(input,batch_input,m,n);
+    dim3 grid(batch_size);
+    dim3 block(MAX_THREADS);
+    SoftmaxKernel<<<grid,block>>>(input,tgt_len,output,scale);
 }
 
-
-void launch_self_attention(float* input,float* wq,float* wk, float* wv,int batch_size,int len,int input_size,int output_size,float* output)
+__device__ int dim5calc(int id_0,int id_1,int id_2,int id_3,int id_4,int dim_1,int dim_2,int dim_3,int dim_4)
 {
-    float *bq,*bk,*bv,*Q,*K,*V,*KT,*QK,*softmaxQK;
-    cudaMalloc((void**)&bq, batch_size * input_size * output_size * sizeof(float));
-    cudaMalloc((void**)&bk, batch_size * input_size * output_size * sizeof(float));
-    cudaMalloc((void**)&bv, batch_size * input_size * output_size * sizeof(float));
-    launch_broadcast(wq,bq,batch_size,input_size,output_size);
-    launch_broadcast(wk,bk,batch_size,input_size,output_size);
-    launch_broadcast(wv,bv,batch_size,input_size,output_size);
+    int nw = id_0;
+    nw = nw * dim_1 + id_1;
+    nw = nw * dim_2 +id_2;
+    nw = nw * dim_3 +id_3;
+    nw = nw * dim_4 +id_4;
+    return nw;
+}
 
-    
+__device__ int dim4calc(int id_0,int id_1,int id_2,int id_3,int dim_1,int dim_2,int dim_3)
+{
+    int nw = id_0;
+    nw = nw * dim_1 + id_1;
+    nw = nw * dim_2 +id_2;
+    nw = nw * dim_3 +id_3;
+    return nw;
+}
+
+__device__ int dim3calc(int id_0,int id_1,int id_2,int dim_1,int dim_2)
+{
+    int nw = id_0;
+    nw = nw * dim_1 + id_1;
+    nw = nw * dim_2 +id_2;
+    return nw;
+}
+
+__global__ void Transform20314Kernel(float *input, int dim_3, int dim_4, float *output)
+{
+    int id_0 = blockIdx.x;
+    int id_1 = blockIdx.y;
+    int id_2 = blockIdx.z;
+    // int id_34 = threadIdx.x;
+    int dim_0 = gridDim.x;
+    int dim_1 = gridDim.y;
+    int dim_2 = gridDim.z;
+    int dim_34 = dim_3 * dim_4;
+    int srcBase = dim4calc(id_0,id_1,id_2,0,dim_1,dim_2,dim_34);
+    int trgBase = dim5calc(id_2,id_0,0,id_1,0,dim_0,dim_3,dim_1,dim_4);
+
+    for (int i=threadIdx.x; i<dim_34; i+=blockDim.x)
+    {
+        int id_3 = i / dim_4;
+        int id_4 = i % dim_4;
+        int newBase = dim3calc(id_3, 0, id_4, dim_1, dim_4);
+        output[trgBase + newBase] = input[srcBase + i];
+        //printf("%d %d %d %d %f\n",trgBase,newBase,srcBase,i, input[srcBase + i ]);
+    }
+
+}
+
+void launch_transform_20314(float *input,int dim_0, int dim_1, int dim_2, int dim_3, int dim_4,float *output)
+{
+    dim3 grid(dim_0,dim_1,dim_2);
+    dim3 block(MAX_THREADS);
+    Transform20314Kernel<<<grid,block>>>(input,dim_3,dim_4,output);
+}
+
+__global__ void Transform021Kernel(float *input, int dim_2 , float *output)
+{
+    int id_0 = blockIdx.x;
+    int id_1 = blockIdx.y;
+    // int id_2 = threadIdx.x;
+    int dim_0 = gridDim.x;
+    int dim_1 = gridDim.y;
+    int srcBase = dim3calc(id_0,id_1,0,dim_1,dim_2);
+    int trgBase = dim3calc(id_0,0,id_1,dim_2,dim_1);
+
+    for (int i=threadIdx.x; i<dim_2; i+=blockDim.x)
+    {
+        int newBase = i * dim_1;
+        output[trgBase + newBase] = input[srcBase + i];
+    }
+
+}
+
+__global__ void Transform0213Kernel(float *input, int dim_3, float *output)
+{
+    int id_0 = blockIdx.x;
+    int id_1 = blockIdx.y;
+    int id_2 = blockIdx.z;
+    // int id_3 = threadIdx.x;
+    int dim_0 = gridDim.x;
+    int dim_1 = gridDim.y;
+    int dim_2 = gridDim.z;
+    int srcBase = dim4calc(id_0,id_1,id_2,0,dim_1,dim_2,dim_3);
+    int trgBase = dim4calc(id_0,id_2,id_1,0,dim_2,dim_1,dim_3);
+
+    for (int i=threadIdx.x; i<dim_3; i+=blockDim.x)
+    {
+        output[trgBase + i] = input[srcBase + i];
+        //printf("%d %d %d %d %f\n",trgBase,newBase,srcBase,i, input[srcBase + i ]);
+    }
+
+}
+
+void launch_transform_0213(float *input,int dim_0, int dim_1, int dim_2, int dim_3,float *output)
+{
+    dim3 grid(dim_0,dim_1,dim_2);
+    dim3 block(MAX_THREADS);
+    Transform0213Kernel<<<grid,block>>>(input,dim_3,output);
+}
+
+void launch_transform_021(float *input,int dim_0, int dim_1, int dim_2,float *output)
+{
+    dim3 grid(dim_0,dim_1);
+    dim3 block(MAX_THREADS);
+    Transform021Kernel<<<grid,block>>>(input,dim_2,output);
+}
+
+void launch_multi_head_attention(float* input,float* qkv,float* o,int batch_size,int tgt_len,int head_num,int hidden_size,float* output)
+{
+    float *QKV,*QKVT,*softmax_input,*KT,*softmax_output,*softmax_T;
+    int size = batch_size * tgt_len * hidden_size;
+    int output_size = hidden_size / head_num;
+    cudaMalloc((void**)&QKV, 3 * size * sizeof(float));
+    cudaMalloc((void**)&QKVT, 3 * size * sizeof(float));
+    cudaMalloc((void**)&softmax_input, batch_size * head_num * tgt_len * tgt_len * sizeof(float));
+    cudaMalloc((void**)&KT, size * sizeof(float));
+
+    launch_matrixmul2(QKV,input,qkv,1, batch_size * tgt_len, 3 * hidden_size, hidden_size);
     cudaThreadSynchronize();
     
-
-    cudaMalloc((void**)&Q, batch_size * len * output_size * sizeof(float));
-	cudaMalloc((void**)&K, batch_size * len * output_size * sizeof(float));
-	cudaMalloc((void**)&V, batch_size * len * output_size * sizeof(float));
-
-    launch_matrixmul2(Q,input,bq,batch_size,len,output_size,input_size);
-    launch_matrixmul2(K,input,bk,batch_size,len,output_size,input_size);
-    launch_matrixmul2(V,input,bv,batch_size,len,output_size,input_size);
     
+    launch_transform_20314(QKV,batch_size,tgt_len,3,head_num,output_size,QKVT);
     cudaThreadSynchronize();
-    cudaFree(bq);cudaFree(bk);cudaFree(bv);
-    //print(K,batch_size,len,output_size);
 
-    cudaMalloc((void**)&KT,batch_size * len * output_size * sizeof(float));
-    launch_matrixT(K,KT,batch_size,len,output_size);
+
+    // QKVT : 3  * batch_size * head_num * tgt_len * output_size
+    float *Q = QKVT;
+    float *K = QKVT + batch_size * tgt_len * hidden_size;
+    float *V = QKVT + 2 * batch_size * tgt_len * hidden_size;
+
+    launch_transform_021(K,batch_size* head_num,tgt_len,output_size,KT);
     cudaThreadSynchronize();
-    //print(KT,batch_size,output_size,len);
 
-    cudaFree(K);
-
-    cudaMalloc((void**)&QK, batch_size * len * len * sizeof(float));
-    launch_matrixmul2(QK,Q,KT,batch_size,len,len,output_size);
+    launch_matrixmul2(softmax_input,Q,KT,batch_size * head_num, tgt_len, tgt_len, output_size);
     cudaThreadSynchronize();
-    cudaFree(Q);
     cudaFree(KT);
-
-    cudaMalloc((void**)&softmaxQK, batch_size * len * len * sizeof(float));
-    launch_softmax(QK,softmaxQK,batch_size,len,len);
+    
+    if (tgt_len>1024) throw std::runtime_error("Sequence length greater than 1024 is currently not supported");
+    cudaMalloc((void**)&softmax_output, batch_size * head_num * tgt_len * tgt_len * sizeof(float));
+    launch_softmax(softmax_input ,batch_size * head_num * tgt_len , tgt_len, softmax_output, sqrt((float)1.0/output_size));
     cudaThreadSynchronize();
-    cudaFree(QK);
+    cudaFree(softmax_input);
 
-    launch_matrixmul2(output,softmaxQK,V,batch_size,len,output_size,len);
+    launch_matrixmul2(output,softmax_output,V,batch_size * head_num, tgt_len, output_size, tgt_len);
     cudaThreadSynchronize();
-    cudaFree(V);
-    cudaFree(softmaxQK);
+    cudaFree(QKVT);
+
+    // print(output , batch_size *head_num, tgt_len , output_size);
+    // cudaThreadSynchronize();
+   
+    cudaMalloc((void**)&softmax_T, batch_size * tgt_len * hidden_size * sizeof(float));
+    launch_transform_0213(output,batch_size,head_num,tgt_len,output_size,softmax_T);
+    cudaThreadSynchronize();
+
+    
+    
+    launch_matrixmul2(output,softmax_T,o,1,batch_size * tgt_len, hidden_size,  hidden_size);
+    cudaThreadSynchronize();
+    cudaFree(softmax_T);
 }
