@@ -1,3 +1,4 @@
+from turtle import forward
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
@@ -7,14 +8,14 @@ from torch.utils.cpp_extension import load
 import time
 
 cuda_module = load(name="multi_head_attention",
-                   sources=["multi_head_attention.cpp", "multi_head_attention.cu"],
+                   sources=["multi_head_attention.cpp", "multi_head_attention.cu","multi_head_layer.cpp"],
                    verbose=True)
 
 
 batch_size = 32
 tgt_len = 128
 head_num = 4
-hidden_size = 1024
+hidden_size = 256
 output_size = hidden_size // head_num
 torch.cuda.manual_seed(0)
 torch.set_printoptions(sci_mode=False)
@@ -64,9 +65,36 @@ class MultiHeadAttentionLayer(nn.Module):
         # print(torch.bmm(QK , V))
         output= self.O_linear(output)
 
-        return output.view(-1,tgt_len,head_num,output_size)
+        return output # .view(-1,tgt_len,head_num,output_size)
 
 att_L = MultiHeadAttentionLayer(head_num,hidden_size,qkv,o)
+
+class MultiHeadFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, inp,qkv,o,batch_size,tgt_len,head_num,hidden_size,output):
+        ctx.save_for_backward(inp,qkv,o)
+        cuda_module.torch_launch_multi_head_attention(inp,qkv,o,batch_size,tgt_len,head_num,hidden_size,output)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return None
+
+class MultiHeadLayer(nn.Module):
+    def __init__(self, hidden_size, head_num , qkv ,  o):
+        super(MultiHeadLayer, self).__init__()
+        self.hidden_size = hidden_size;
+        self.head_num = head_num;
+        self.output_size = hidden_size // head_num;
+
+        self.qkv = nn.Parameter(qkv.float())
+        self.o = nn.Parameter(o.float())
+
+    def forward(self,inp):
+        batch_size , tgt_len , _ = inp.size()
+        output = torch.empty((batch_size,tgt_len,hidden_size), device = "cuda:0")
+        MultiHeadFunction.apply(inp,qkv,o,batch_size,tgt_len,head_num,hidden_size,output)
+        return output
+    
 
 def show_time(func):
     times = list()
@@ -87,7 +115,8 @@ def run_torch():
     return att_out
 
 def run_cuda():
-    cuda_module.torch_launch_multi_head_attention(inp,qkv,o,batch_size,tgt_len,head_num,hidden_size,output)
+    model = MultiHeadLayer(hidden_size, head_num, qkv, o)
+    output = model(inp)
     return output
 
 if __name__ == '__main__':

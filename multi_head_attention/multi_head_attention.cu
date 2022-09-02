@@ -6,9 +6,10 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <math.h>
+
+#include "multi_head_attention.h"
 #define TILE_WIDTH 32
 #define MAX_THREADS 1024
-#define EE float(2.71828182845904523536)
 __global__ void MatrixMulKernel(float* M,float* N, float* P, int m ,int n, int k)
 {
     __shared__ float ds_M[TILE_WIDTH][TILE_WIDTH];
@@ -270,56 +271,69 @@ void launch_transform_021(float *input,int dim_0, int dim_1, int dim_2,float *ou
     Transform021Kernel<<<grid,block>>>(input,dim_2,output);
 }
 
-void launch_multi_head_attention(float* input,float* qkv,float* o,int batch_size,int tgt_len,int head_num,int hidden_size,float* output)
-{
-    float *QKV,*QKVT,*softmax_input,*KT,*softmax_output,*softmax_T;
-    int size = batch_size * tgt_len * hidden_size;
-    int output_size = hidden_size / head_num;
-    cudaMalloc((void**)&QKV, 3 * size * sizeof(float));
-    cudaMalloc((void**)&QKVT, 3 * size * sizeof(float));
-    cudaMalloc((void**)&softmax_input, batch_size * head_num * tgt_len * tgt_len * sizeof(float));
-    cudaMalloc((void**)&KT, size * sizeof(float));
+// void launch_multi_head_attention(float* input,float* qkv,float* o,int batch_size,int tgt_len,int head_num,int hidden_size,float* output)
+// {
+//     float *QKV,*QKVT,*softmax_input,*KT,*softmax_output,*softmax_T;
+//     int size = batch_size * tgt_len * hidden_size;
+//     int output_size = hidden_size / head_num;
+//     cudaMalloc((void**)&QKV, 3 * size * sizeof(float));
+//     cudaMalloc((void**)&QKVT, 3 * size * sizeof(float));
+//     cudaMalloc((void**)&softmax_input, batch_size * head_num * tgt_len * tgt_len * sizeof(float));
+//     cudaMalloc((void**)&KT, size * sizeof(float));
 
-    launch_matrixmul2(QKV,input,qkv,1, batch_size * tgt_len, 3 * hidden_size, hidden_size);
-    cudaThreadSynchronize();
+//     launch_matrixmul2(QKV,input,qkv,1, batch_size * tgt_len, 3 * hidden_size, hidden_size);
+//     cudaThreadSynchronize();
     
     
-    launch_transform_20314(QKV,batch_size,tgt_len,3,head_num,output_size,QKVT);
-    cudaThreadSynchronize();
+//     launch_transform_20314(QKV,batch_size,tgt_len,3,head_num,output_size,QKVT);
+//     cudaThreadSynchronize();
 
 
-    // QKVT : 3  * batch_size * head_num * tgt_len * output_size
-    float *Q = QKVT;
-    float *K = QKVT + batch_size * tgt_len * hidden_size;
-    float *V = QKVT + 2 * batch_size * tgt_len * hidden_size;
+//     // QKVT : 3  * batch_size * head_num * tgt_len * output_size
+//     float *Q = QKVT;
+//     float *K = QKVT + batch_size * tgt_len * hidden_size;
+//     float *V = QKVT + 2 * batch_size * tgt_len * hidden_size;
 
-    launch_transform_021(K,batch_size* head_num,tgt_len,output_size,KT);
-    cudaThreadSynchronize();
+//     launch_transform_021(K,batch_size* head_num,tgt_len,output_size,KT);
+//     cudaThreadSynchronize();
 
-    launch_matrixmul2(softmax_input,Q,KT,batch_size * head_num, tgt_len, tgt_len, output_size);
-    cudaThreadSynchronize();
-    cudaFree(KT);
+//     launch_matrixmul2(softmax_input,Q,KT,batch_size * head_num, tgt_len, tgt_len, output_size);
+//     cudaThreadSynchronize();
+//     cudaFree(KT);
     
-    if (tgt_len>1024) throw std::runtime_error("Sequence length greater than 1024 is currently not supported");
-    cudaMalloc((void**)&softmax_output, batch_size * head_num * tgt_len * tgt_len * sizeof(float));
-    launch_softmax(softmax_input ,batch_size * head_num * tgt_len , tgt_len, softmax_output, sqrt((float)1.0/output_size));
-    cudaThreadSynchronize();
-    cudaFree(softmax_input);
+//     if (tgt_len>1024) throw std::runtime_error("Sequence length greater than 1024 is currently not supported");
+//     cudaMalloc((void**)&softmax_output, batch_size * head_num * tgt_len * tgt_len * sizeof(float));
+//     launch_softmax(softmax_input ,batch_size * head_num * tgt_len , tgt_len, softmax_output, sqrt((float)1.0/output_size));
+//     cudaThreadSynchronize();
+//     cudaFree(softmax_input);
 
-    launch_matrixmul2(output,softmax_output,V,batch_size * head_num, tgt_len, output_size, tgt_len);
-    cudaThreadSynchronize();
-    cudaFree(QKVT);
+//     launch_matrixmul2(output,softmax_output,V,batch_size * head_num, tgt_len, output_size, tgt_len);
+//     cudaThreadSynchronize();
+//     cudaFree(QKVT);
 
-    // print(output , batch_size *head_num, tgt_len , output_size);
-    // cudaThreadSynchronize();
+//     // print(output , batch_size *head_num, tgt_len , output_size);
+//     // cudaThreadSynchronize();
    
-    cudaMalloc((void**)&softmax_T, batch_size * tgt_len * hidden_size * sizeof(float));
-    launch_transform_0213(output,batch_size,head_num,tgt_len,output_size,softmax_T);
-    cudaThreadSynchronize();
+//     cudaMalloc((void**)&softmax_T, batch_size * tgt_len * hidden_size * sizeof(float));
+//     launch_transform_0213(output,batch_size,head_num,tgt_len,output_size,softmax_T);
+//     cudaThreadSynchronize();
 
     
     
-    launch_matrixmul2(output,softmax_T,o,1,batch_size * tgt_len, hidden_size,  hidden_size);
+//     launch_matrixmul2(output,softmax_T,o,1,batch_size * tgt_len, hidden_size,  hidden_size);
+//     cudaThreadSynchronize();
+//     cudaFree(softmax_T);
+// }
+
+float *cuda_malloc(size_t ele_num)
+{
+    size_t byte_size = ele_num * sizeof(float);
+    float *a = NULL;    
+    cudaMalloc((void**)&a, byte_size * sizeof(float));
+    return a;
+}
+
+void cuda_synchronize()
+{
     cudaThreadSynchronize();
-    cudaFree(softmax_T);
 }
