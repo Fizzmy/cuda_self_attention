@@ -9,29 +9,31 @@ pytorch版本：1.9.0
 
 ## 实现
 
+### self_attention
+
 cuda中实现了多个核函数，具体如下：
 
-### MatrixMulKernel
+#### MatrixMulKernel
 
 矩阵乘法核函数，使用CSE599W第五节所讲的GEMM算法
 
-### MatrixTKernel
+#### MatrixTKernel
 
 矩阵转置核函数
 
-### ReduceMaxKernel
+#### ReduceMaxKernel
 
 求行的最大值核函数，使用规约的方法实现（类似于倍增的思想）
 
-### BroadCastSubExpKernel
+#### BroadCastSubExpKernel
 
 广播进行减操作和幂操作的核函数
 
-### ReduceSumKernel
+#### ReduceSumKernel
 
 求行的和核函数，使用规约的方法实现（类似于倍增的思想）
 
-### DivKernel
+#### DivKernel
 
 广播进行除操作的核函数
 
@@ -47,13 +49,27 @@ cuda中实现了多个核函数，具体如下：
 
 可以看到在数据较小的情况下，算法的性能是优于torch实现的算子的
 
-## TODO
+#### TODO
 
 算子的自动求导
 
 batch的boradcast核函数的实现
 
-## 感想
+#### 感想
 
 感觉实现的过程有点像CSE599W作业2写TVM的流程，但是写cuda要比tvm要复杂一些，涉及一些并行的算法
+
+### multi_head_attention
+
+实现了多头注意力机制及其反向传播
+
+比torch实现的最navie的multi_head_attention要快很多，还未跟lightseq进行比较
+
+详情可见文件`multi_head_attention分析.md`
+
+#### TODO
+
+结合cuBLAS、cu等库，进一步提升速度
+
+当前版本cuda backward存在在大数据情况下与pytorch backward结果相差过多的问题，还在debuging
 
