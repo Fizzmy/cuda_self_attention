@@ -12,20 +12,22 @@ cuda_module = load(name="multi_head_attention",
                    verbose=True)
 
 
-batch_size = 32
-tgt_len = 128
-head_num = 4
-hidden_size = 256
+batch_size = 1 # 32
+tgt_len = 128 # 128
+head_num = 4 # 4
+hidden_size = 16 # 256
 output_size = hidden_size // head_num
 torch.cuda.manual_seed(0)
 torch.set_printoptions(sci_mode=False)
-inp = torch.rand((batch_size,tgt_len,hidden_size), device = "cuda:0")
-qkv = torch.rand((hidden_size,3*hidden_size),device = "cuda:0")
-o = torch.rand((hidden_size,hidden_size), device = "cuda:0")
+inp = torch.rand((batch_size,tgt_len,hidden_size), device = "cuda:0",requires_grad=True)
+qkv = torch.rand((hidden_size,3*hidden_size),device = "cuda:0",requires_grad=True)
+o = torch.rand((hidden_size,hidden_size), device = "cuda:0",requires_grad=True)
 
+torch_inp_grad, torch_qkv_grad, torch_o_grad = None, None, None
+cuda_inp_grad, cuda_qkv_grad, cuda_o_grad = None, None, None
 
 output = torch.rand((batch_size,tgt_len,head_num,output_size), device = "cuda:0")
-ntest = 10
+ntest = 1
 
 class MultiHeadAttentionLayer(nn.Module):
     
@@ -71,13 +73,23 @@ att_L = MultiHeadAttentionLayer(head_num,hidden_size,qkv,o)
 
 class MultiHeadFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, inp,qkv,o,batch_size,tgt_len,head_num,hidden_size,output):
+    def forward(ctx, inp,qkv,o,batch_size,tgt_len,head_num,hidden_size):
         ctx.save_for_backward(inp,qkv,o)
+        output = torch.empty((batch_size,tgt_len,hidden_size)).to(device="cuda:0")
         cuda_module.torch_launch_multi_head_attention(inp,qkv,o,batch_size,tgt_len,head_num,hidden_size,output)
+        # print(output)
+        return output
 
     @staticmethod
-    def backward(ctx, grad):
-        return None
+    def backward(ctx, grad_output):
+        inp, qkv, o = ctx.saved_tensors
+
+        grad = grad_output.clone()
+        input_grad = torch.empty((batch_size,tgt_len,hidden_size), device = "cuda:0")
+        qkv_grad = torch.empty((hidden_size,3*hidden_size), device = "cuda:0")
+        o_grad = torch.empty((hidden_size,hidden_size), device = "cuda:0")
+        cuda_module.torch_launch_multi_head_attention_bw(grad,input_grad,qkv_grad,o_grad)
+        return (input_grad,qkv_grad,o_grad,None,None,None,None)
 
 class MultiHeadLayer(nn.Module):
     def __init__(self, hidden_size, head_num , qkv ,  o):
@@ -90,9 +102,8 @@ class MultiHeadLayer(nn.Module):
         self.o = nn.Parameter(o.float())
 
     def forward(self,inp):
-        batch_size , tgt_len , _ = inp.size()
-        output = torch.empty((batch_size,tgt_len,hidden_size), device = "cuda:0")
-        MultiHeadFunction.apply(inp,qkv,o,batch_size,tgt_len,head_num,hidden_size,output)
+        batch_size , tgt_len , _ = inp.size() 
+        output = MultiHeadFunction.apply(inp,qkv,o,batch_size,tgt_len,head_num,hidden_size)
         return output
     
 
@@ -112,23 +123,51 @@ def show_time(func):
 def run_torch():
 
     att_out = att_L(inp)
+    loss = att_out.sum()
+    print(loss)
+    loss.backward()
+    global torch_inp_grad
+    torch_inp_grad = inp.grad.cpu().numpy()
+    global torch_qkv_grad
+    torch_qkv_grad = att_L.QKV_linear.weight.grad.permute(1,0).cpu().numpy()
+    global torch_o_grad
+    torch_o_grad = att_L.O_linear.weight.grad.permute(1,0).cpu().numpy()
+
     return att_out
 
 def run_cuda():
     model = MultiHeadLayer(hidden_size, head_num, qkv, o)
+    inp.grad.data.zero_()
     output = model(inp)
+    loss = output.sum()
+    print(loss)
+    loss.backward()
+    global cuda_inp_grad
+    cuda_inp_grad = inp.grad.cpu().numpy()
+    global cuda_qkv_grad
+    cuda_qkv_grad = qkv.grad.cpu().numpy()
+    global cuda_o_grad
+    cuda_o_grad = o.grad.cpu().numpy()
+
     return output
 
 if __name__ == '__main__':
 
+    print("Running torch...")
+    torch_time , res2 = show_time(run_torch)
+    print("Torch time:  {:.3f}us".format(np.mean(torch_time)))
+    
     print("Running cuda...")
     cuda_time , res1 = show_time(run_cuda)
     print("Cuda time:  {:.3f}us".format(np.mean(cuda_time)))
 
-    print("Running torch...")
-    torch_time , res2 = show_time(run_torch)
-    print("Torch time:  {:.3f}us".format(np.mean(torch_time)))
-
     # print(res1[0])
-    np.testing.assert_allclose(res1[0].cpu().numpy(), res2[0].cpu().detach().numpy(), rtol=1e-4)
+    np.testing.assert_allclose(res1[0].cpu().detach().numpy(), res2[0].cpu().detach().numpy(), rtol=1e-4)
+    
+    np.testing.assert_allclose(torch_o_grad, cuda_o_grad, rtol=1e-4)
+    # print(torch_inp_grad)
+    # print(cuda_inp_grad)
+    np.testing.assert_allclose(torch_inp_grad, cuda_inp_grad, rtol=1e-4)
+    np.testing.assert_allclose(torch_qkv_grad, cuda_qkv_grad, rtol=1e-4)
+    
     

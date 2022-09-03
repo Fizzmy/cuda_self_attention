@@ -212,11 +212,42 @@ __global__ void Transform20314Kernel(float *input, int dim_3, int dim_4, float *
 
 }
 
+__global__ void Transform13024Kernel(float *input, int dim_3, int dim_4, float *output)
+{
+    int id_0 = blockIdx.x;
+    int id_1 = blockIdx.y;
+    int id_2 = blockIdx.z;
+    // int id_34 = threadIdx.x;
+    int dim_0 = gridDim.x;
+    int dim_1 = gridDim.y;
+    int dim_2 = gridDim.z;
+    int dim_34 = dim_3 * dim_4;
+    int srcBase = dim4calc(id_0,id_1,id_2,0,dim_1,dim_2,dim_34);
+    int trgBase = dim5calc(id_1,0,id_0,id_2,0,dim_3,dim_0,dim_2,dim_4);
+
+    for (int i=threadIdx.x; i<dim_34; i+=blockDim.x)
+    {
+        int id_3 = i / dim_4;
+        int id_4 = i % dim_4;
+        int newBase = dim4calc(id_3, 0, 0, id_4, dim_0, dim_2, dim_4);
+        output[trgBase + newBase] = input[srcBase + i];
+        //printf("%d %d %d %d %f\n",trgBase,newBase,srcBase,i, input[srcBase + i ]);
+    }
+
+}
+
 void launch_transform_20314(float *input,int dim_0, int dim_1, int dim_2, int dim_3, int dim_4,float *output)
 {
     dim3 grid(dim_0,dim_1,dim_2);
     dim3 block(MAX_THREADS);
     Transform20314Kernel<<<grid,block>>>(input,dim_3,dim_4,output);
+}
+
+void launch_transform_13024(float *input,int dim_0, int dim_1, int dim_2, int dim_3, int dim_4,float *output)
+{
+    dim3 grid(dim_0,dim_1,dim_2);
+    dim3 block(MAX_THREADS);
+    Transform13024Kernel<<<grid,block>>>(input,dim_3,dim_4,output);
 }
 
 __global__ void Transform021Kernel(float *input, int dim_2 , float *output)
@@ -269,6 +300,40 @@ void launch_transform_021(float *input,int dim_0, int dim_1, int dim_2,float *ou
     dim3 grid(dim_0,dim_1);
     dim3 block(MAX_THREADS);
     Transform021Kernel<<<grid,block>>>(input,dim_2,output);
+}
+
+__global__ void SoftmaxBwKernel(float *input,float *input_grad,int tgt_len,float *output,float scale)
+{
+    __shared__ float ds[MAX_THREADS];
+
+    int tid = threadIdx.x;
+    int base = blockIdx.x * tgt_len;
+    //int baseInput = ;
+    //int baseOutput = blockIdx.x * m ;
+    //float outp;
+    if (tid < tgt_len)
+        ds[tid] = input[base + tid] * input_grad[base + tid];
+        //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
+    __syncthreads();
+
+    for(int s = blockDim.x/2; s > 0; s>>=1){   
+        if(tid < s && tid + s < tgt_len){
+            ds[tid] += ds[tid + s];
+            //printf("%d %.3f\n",s,ds[tid]);
+        }
+        __syncthreads();
+    }
+
+    if (tid<tgt_len)
+        output[base + tid] = scale * input[base + tid] * (input_grad[base + tid] - ds[0]);
+
+}
+
+void launch_softmax_bw(float *input,float *input_grad,int batch_size,int tgt_len,float *output,float scale)
+{
+    dim3 grid(batch_size);
+    dim3 block(MAX_THREADS);
+    SoftmaxBwKernel<<<grid,block>>>(input,input_grad,tgt_len,output,scale);
 }
 
 // void launch_multi_head_attention(float* input,float* qkv,float* o,int batch_size,int tgt_len,int head_num,int hidden_size,float* output)
@@ -332,6 +397,12 @@ float *cuda_malloc(size_t ele_num)
     cudaMalloc((void**)&a, byte_size * sizeof(float));
     return a;
 }
+
+void cuda_free(float *x)
+{
+    cudaFree(x);
+}
+
 
 void cuda_synchronize()
 {
