@@ -8,6 +8,8 @@ void launch_matrixmul2(float* c,
                  int batch_size, int m , int n , int k);
 
 void launch_matrixT(float *input,float *output,int batch_size,int m,int n);
+void launch_layernorm(float *input,int batch_size,int hidden_size,float *input_hat,float *output,float *input_mean,float *input_std,float *normw,float *normb);
+void launch_layernorm_bw(float *input_grad,int batch_size,int hidden_size,float *input_hat,float *input_mean,float *input_std,float *normw,float *output,float *normw_grad,float *normb_grad);
 void launch_softmax(float *input,int batch_size,int tgt_len,float *output,float scale);
 void launch_softmax_bw(float *input,float *input_grad,int batch_size,int tgt_len,float *output,float scale);
 void launch_transform_20314(float *input,int dim_0, int dim_1, int dim_2, int dim_3, int dim_4,float *output);

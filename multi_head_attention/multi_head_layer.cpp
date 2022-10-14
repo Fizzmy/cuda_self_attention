@@ -15,16 +15,22 @@ void MultiHeadLayer::SetConfig(int bs,int tl,int hn,int hs)
     hidden_size=hs;
     output_size=hs/hn;
 }
-void MultiHeadLayer::SetWeight(float *input_w,float *qkv_w,float *o_w)
+void MultiHeadLayer::SetWeight(float *input_w,float *norm_w,float *norm_b,float *qkv_w,float *o_w)
 {
     qkv=qkv_w;
     o=o_w;
     input=input_w;
+    normw=norm_w;
+    normb=norm_b;
 }
 void MultiHeadLayer::FreeAll(){
     cuda_free(QKVT);
     cuda_free(softmax_output);
     cuda_free(softmax_T);
+    cuda_free(input_norm);
+    cuda_free(input_mean);
+    cuda_free(input_std);
+    cuda_free(input_hat);
     // float *QKV,*QKVT,*softmax_input,*KT,*softmax_output,*softmax_T;
     //     float *qkv,*o,*input;
 }
@@ -38,7 +44,16 @@ void MultiHeadLayer::Forward(float* output)
     float *softmax_input=cuda_malloc(batch_size * head_num * tgt_len * tgt_len);
     float *KT=cuda_malloc(size);
 
-    launch_matrixmul2(QKV,input,qkv,1, batch_size * tgt_len, 3 * hidden_size, hidden_size);
+    input_norm=cuda_malloc(size);
+    input_mean=cuda_malloc(batch_size * tgt_len);
+    input_std=cuda_malloc(batch_size * tgt_len);
+    input_hat=cuda_malloc(batch_size * tgt_len);
+    
+    launch_layernorm(input,batch_size * tgt_len, hidden_size, input_hat, input_norm, input_mean, input_std, normw, normb);
+    cuda_synchronize();
+    //print(input,batch_size,tgt_len,hidden_size);
+    //print(input_norm,batch_size,tgt_len,hidden_size);
+    launch_matrixmul2(QKV,input_norm,qkv,1, batch_size * tgt_len, 3 * hidden_size, hidden_size);
     cuda_synchronize();
 
     launch_transform_20314(QKV,batch_size,tgt_len,3,head_num,output_size,QKVT);
@@ -78,7 +93,7 @@ void MultiHeadLayer::Forward(float* output)
 }
 
 
-void MultiHeadLayer::Backward(float* grad, float* input_grad,float* qkv_grad,float* o_grad)
+void MultiHeadLayer::Backward(float* grad, float* input_grad,float* normw_grad,float *normb_grad,float* qkv_grad,float* o_grad)
 {
     float *softmax_T021 = cuda_malloc( batch_size * tgt_len * hidden_size );
     float *o_T = cuda_malloc( hidden_size * hidden_size ); 
@@ -119,6 +134,10 @@ void MultiHeadLayer::Backward(float* grad, float* input_grad,float* qkv_grad,flo
     float *softmax_input_grad = cuda_malloc(batch_size*head_num*tgt_len*tgt_len);
     launch_softmax_bw(softmax_output,softmax_output_grad,batch_size*head_num*tgt_len, tgt_len, softmax_input_grad, sqrt((float)1.0/output_size));
     cuda_synchronize();
+    //print(softmax_output,batch_size*head_num,tgt_len,tgt_len);
+    //print(softmax_output_grad,batch_size*head_num,tgt_len,tgt_len);
+    //print(softmax_input_grad,batch_size*head_num,tgt_len,tgt_len);
+    //cuda_synchronize();
     cuda_free(softmax_output_grad);
 
     float *softmax_input_grad_T = cuda_malloc(batch_size * head_num * tgt_len * tgt_len);
@@ -127,6 +146,8 @@ void MultiHeadLayer::Backward(float* grad, float* input_grad,float* qkv_grad,flo
     launch_matrixmul2(Q_grad, softmax_input_grad, K , batch_size * head_num , tgt_len, output_size, tgt_len); 
     launch_matrixmul2(K_grad, softmax_input_grad_T, Q, batch_size * head_num , tgt_len, output_size, tgt_len);
     cuda_synchronize();
+    //print(QKV_grad,3*batch_size*head_num,tgt_len,output_size);
+    //cuda_synchronize();
     cuda_free(softmax_input_grad);
     cuda_free(softmax_input_grad_T);
 
@@ -135,13 +156,23 @@ void MultiHeadLayer::Backward(float* grad, float* input_grad,float* qkv_grad,flo
     cuda_synchronize();
     cuda_free(QKV_grad);
     
-    float *input_T = cuda_malloc( batch_size * tgt_len * hidden_size);
-    float *qkv_T = cuda_malloc( 3 * batch_size * tgt_len * hidden_size);
-    launch_transform_021(input, 1, batch_size * tgt_len, hidden_size, input_T);
+    float *input_norm_T = cuda_malloc( batch_size * tgt_len * hidden_size);
+    float *qkv_T = cuda_malloc( 3 * hidden_size * hidden_size);
+    launch_transform_021(input_norm, 1, batch_size * tgt_len, hidden_size, input_norm_T);
     launch_transform_021(qkv , 1, hidden_size, 3 * hidden_size, qkv_T);
     cuda_synchronize();
-    launch_matrixmul2(qkv_grad, input_T, QKV_grad_T, 1, hidden_size, 3*hidden_size, batch_size*tgt_len);
-    launch_matrixmul2(input_grad, QKV_grad_T, qkv_T, 1, batch_size * tgt_len, hidden_size, 3 * hidden_size);
+    //print(QKV_grad_T,batch_size,tgt_len,3 * hidden_size);
+    //print(qkv_T,1,3*hidden_size,hidden_size);
+
+    float *norm_grad = cuda_malloc( batch_size * tgt_len * hidden_size);
+    launch_matrixmul2(qkv_grad, input_norm_T, QKV_grad_T, 1, hidden_size, 3*hidden_size, batch_size*tgt_len);
+    launch_matrixmul2(norm_grad, QKV_grad_T, qkv_T, 1, batch_size * tgt_len, hidden_size, 3 * hidden_size);
     cuda_synchronize();
+    
+    launch_layernorm_bw(norm_grad,batch_size*tgt_len,hidden_size,input_hat,input_mean,input_std,normw,input_grad,normw_grad,normb_grad);
+    cuda_synchronize();
+    cuda_free(input_norm_T);
+    cuda_free(qkv_T);
+    cuda_free(QKV_grad_T);
 
 }

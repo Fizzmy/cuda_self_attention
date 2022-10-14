@@ -10,6 +10,7 @@
 #include "multi_head_attention.h"
 #define TILE_WIDTH 32
 #define MAX_THREADS 1024
+#define EPS 1e-8f
 __global__ void MatrixMulKernel(float* M,float* N, float* P, int m ,int n, int k)
 {
     __shared__ float ds_M[TILE_WIDTH][TILE_WIDTH];
@@ -38,6 +39,13 @@ __global__ void MatrixMulKernel(float* M,float* N, float* P, int m ,int n, int k
             for (int i = 0; i < TILE_WIDTH; ++i)
                 if (p*TILE_WIDTH+i<k)
                     Pvalue += ds_M[ty][i] * ds_N[i][tx];
+                /*
+                 float y,t;
+                    y = ds_M[ty][i] * ds_N[i][tx] - c;
+                    t = sum + y;
+                    c = (t - sum) - y;
+                    sum = t;
+                */
             //printf("%d %d %.3f\n",Row,Col,Pvalue);
         }
         __syncthreads();
@@ -136,22 +144,27 @@ __global__ void SoftmaxKernel(float *input,int tgt_len,float *output,float scale
 
 }
 
-__global__ void PrintKernel(float *input,int m,int n) // m*n
+__global__ void PrintKernel(float *input,int m,int n,int kk) // m*n
 {
     //__shared__ float ds[TILE_WIDTH][TILE_WIDTH];
-    int base=blockIdx.x * m * n;
-    int bx = blockIdx.y; int by = blockIdx.z;
-    int tx = threadIdx.x; int ty = threadIdx.y;
-    int Row = by * blockDim.y + ty;
-    int Col = bx * blockDim.x + tx;
-    if (Row<m && Col<n)
-        printf("%d %d %d %.3f\n",blockIdx.x,Row,Col,input[base + n * Row + Col]);
+    for (int i=0;i<m;i++)
+    {
+        printf("[");
+        for (int j=0;j<n;j++)
+        {
+            printf("[");
+            for (int k=0;k<kk;k++)
+                printf("%.5f ",input[i * n * kk + j * kk + k]);
+            printf("]\n");
+        }
+        printf("]\n");
+    }
 }
 void print(float *c,int batch_size,int m,int n)
 {
-    dim3 grid(batch_size,(n+TILE_WIDTH-1)/TILE_WIDTH,(m+TILE_WIDTH-1)/TILE_WIDTH);
-    dim3 block(TILE_WIDTH,TILE_WIDTH);
-    PrintKernel<<<grid, block>>>(c,m,n);
+    dim3 grid(1);
+    dim3 block(1);
+    PrintKernel<<<grid, block>>>(c,batch_size,m,n);
 }
 
 void launch_softmax(float *input,int batch_size,int tgt_len,float *output,float scale){
@@ -335,7 +348,147 @@ void launch_softmax_bw(float *input,float *input_grad,int batch_size,int tgt_len
     dim3 block(MAX_THREADS);
     SoftmaxBwKernel<<<grid,block>>>(input,input_grad,tgt_len,output,scale);
 }
+__global__ void LayernormKernel(float *input,int batch_size,int hidden_size,float *input_hat,float *output,float *input_mean,float *input_std,float *normw,float *normb)
+{
+    __shared__ float mean[MAX_THREADS],mean_sqare[MAX_THREADS];
+    int tid = threadIdx.x;
+    int base = blockIdx.x * hidden_size;
+    //int baseInput = ;
+    //int baseOutput = blockIdx.x * m ;
+    mean[tid]=mean_sqare[tid]=0;
+    for (int i = tid; i < hidden_size; i += blockDim.x)
+    {
+        mean[tid] += input[ base + i ];
+        mean_sqare[tid] += input[ base + i ] * input[ base + i ];
+        //printf("%.3f %.3f\n",scale,input[ base + tid ] * scale);
+    }
+        //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
+    __syncthreads();
 
+    for(int s = blockDim.x/2; s > 0; s>>=1){   
+        if(tid < s && tid + s < hidden_size && tid + s < blockDim.x)
+        {
+            mean[tid] += mean[tid + s];
+            mean_sqare[tid] += mean_sqare[tid + s];
+            //printf("%d %.3f\n",s,ds[tid]);
+        }
+        __syncthreads();
+    }
+
+    __shared__ float tot_mean, tot_std;
+    if (tid == 0)
+    {
+        tot_mean = mean[0] / hidden_size;
+        input_mean[ blockIdx.x ] = tot_mean;
+        tot_std = mean_sqare[0] / hidden_size - tot_mean * tot_mean + EPS;
+        //printf("%f\n",tot_std);
+        tot_std = rsqrtf(tot_std);
+        input_std[ blockIdx.x ] = tot_std;
+        //printf("%f %f\n",tot_mean,tot_std);
+    }
+    __syncthreads();
+
+    float hat;
+    for (int i = tid; i < hidden_size; i += blockDim.x)
+    {
+        hat = ( input[ base + i ] - tot_mean ) * tot_std;
+        output[ base + i ] = hat * normw[i] + normb[i];
+        input_hat[ base + i ] = hat;
+    }
+}
+void launch_layernorm(float *input,int batch_size,int hidden_size,float *input_hat,float *output,float *input_mean,float *input_std,float *normw,float *normb)
+{
+    dim3 grid(batch_size);
+    dim3 block(MAX_THREADS);
+    LayernormKernel<<<grid,block>>>(input,batch_size,hidden_size,input_hat,output,input_mean,input_std,normw,normb);
+}
+
+__global__ void LayernormBwKernel_wb(float *input_grad,float *input_hat,int batch_size,int hidden_size,float *normw_grad,float *normb_grad)
+{
+    __shared__ float dw[MAX_THREADS],db[MAX_THREADS];
+    int base = blockIdx.x; // hidden_size
+    int tid = threadIdx.x; // batch_size
+    int nw;
+    //int baseInput = ;
+    //int baseOutput = blockIdx.x * m ;
+    dw[tid]=db[tid]=0;
+    for (int i = tid; i < batch_size; i += blockDim.x)
+    {
+        nw = i * hidden_size + base;
+        dw[tid] += input_grad[ nw ] * input_hat[ nw ];
+        db[tid] += input_grad[ nw ];
+        //printf("%.3f %.3f\n",scale,input[ base + tid ] * scale);
+    }
+        //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
+    __syncthreads();
+
+    for(int s = blockDim.x/2; s > 0; s>>=1){   
+        if(tid < s && tid + s < batch_size && tid + s < blockDim.x)
+        {
+            dw[tid] += dw[tid + s];
+            db[tid] += db[tid + s];
+            //printf("%d %.3f\n",s,ds[tid]);
+        }
+        __syncthreads();
+    }
+    if (tid == 0)
+    {
+        normw_grad[ blockIdx.x ] = dw[0];
+        normb_grad[ blockIdx.x ] = db[0];
+        //printf("%f %f\n",tot_mean,tot_std);
+    }
+}
+__global__ void LayernormBwKernel_input(float *input_grad,float *input_hat,float *input_std,float *normw,int batch_size,int hidden_size,float *output)
+{
+    __shared__ float yw[MAX_THREADS],ywx[MAX_THREADS];
+    int tid = threadIdx.x;
+    int base = blockIdx.x * hidden_size;
+    //int baseInput = ;
+    //int baseOutput = blockIdx.x * m ;
+    yw[tid]=ywx[tid]=0;
+    for (int i = tid; i < hidden_size; i += blockDim.x)
+    {
+        yw[tid] += input_grad[ base + i ] * normw[ i ];
+        ywx[tid] += input_grad[ base + i ] * normw[ i ] * input_hat[ base + i ];
+        //printf("%.3f %.3f\n",scale,input[ base + tid ] * scale);
+    }
+        //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
+    __syncthreads();
+
+    for(int s = blockDim.x/2; s > 0; s>>=1){   
+        if(tid < s && tid + s < hidden_size && tid + s < blockDim.x)
+        {
+            yw[tid] += yw[tid + s];
+            ywx[tid] += ywx[tid + s];
+            //printf("%d %.3f\n",s,ds[tid]);
+        }
+        __syncthreads();
+    }
+
+    __shared__ float tot_yw, tot_ywx;
+    if (tid == 0)
+    {
+        tot_yw = yw[0];
+        tot_ywx = ywx[0];
+    }
+    __syncthreads();
+    for (int i = tid; i < hidden_size; i += blockDim.x)
+    {
+        output[ base + i ] = (input_grad[ base + i ] * normw[ i ] - (tot_yw + input_hat[ base + i ] * tot_ywx) / hidden_size) * input_std[ blockIdx.x ];
+    }
+}
+void launch_layernorm_bw(float *input_grad,int batch_size,int hidden_size,float *input_hat,float *input_mean,float *input_std,float *normw,float *output,float *normw_grad,float *normb_grad)
+{
+    dim3 grid(hidden_size);
+    dim3 block(MAX_THREADS);
+    //print(input_grad,1,batch_size,hidden_size);
+    //print(input_hat,1,batch_size,hidden_size);
+    LayernormBwKernel_wb<<<grid,block>>>(input_grad,input_hat,batch_size,hidden_size,normw_grad,normb_grad);
+    //print(normw_grad,1,1,hidden_size);
+    dim3 grid2(batch_size);
+    dim3 block2(MAX_THREADS);
+    LayernormBwKernel_input<<<grid2,block2>>>(input_grad,input_hat,input_std,normw,batch_size,hidden_size,output);
+}
 // void launch_multi_head_attention(float* input,float* qkv,float* o,int batch_size,int tgt_len,int head_num,int hidden_size,float* output)
 // {
 //     float *QKV,*QKVT,*softmax_input,*KT,*softmax_output,*softmax_T;
