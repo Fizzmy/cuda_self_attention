@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <math.h>
+#include <stddef.h>
 
 #include "multi_head_attention.h"
 #define TILE_WIDTH 32
@@ -561,3 +562,14 @@ void cuda_synchronize()
 {
     cudaThreadSynchronize();
 }
+
+void gpuMemReport()
+{
+    size_t avail = 0;
+    size_t total = 0;
+    size_t free = 0;
+    char tstring[32] = { '\0' };
+    cudaMemGetInfo(&avail, &total);  
+    printf("%s Memory avaliable: Free: %zu, Total: %zu, %s: %zu \n", tstring, avail, total,"Allocated:\0" , (total - avail) );
+}
+

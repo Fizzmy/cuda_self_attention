@@ -214,8 +214,8 @@ if __name__ == '__main__':
     # print(torch_inp_grad)
     # print(cuda_inp_grad)
     
-    np.testing.assert_allclose(cuda_qkv_grad, torch_qkv_grad, rtol=30)
-    np.testing.assert_allclose(cuda_normw_grad, torch_normw_grad, rtol=100)
+    np.testing.assert_allclose(cuda_qkv_grad, torch_qkv_grad, rtol=5)
+    np.testing.assert_allclose(cuda_normw_grad, torch_normw_grad, rtol=1e-2)
     np.testing.assert_allclose(cuda_normb_grad, torch_normb_grad, rtol=1e-2)
     np.testing.assert_allclose(cuda_inp_grad, torch_inp_grad, rtol=1e-2)
     

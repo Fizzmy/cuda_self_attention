@@ -47,7 +47,7 @@ void MultiHeadLayer::Forward(float* output)
     input_norm=cuda_malloc(size);
     input_mean=cuda_malloc(batch_size * tgt_len);
     input_std=cuda_malloc(batch_size * tgt_len);
-    input_hat=cuda_malloc(batch_size * tgt_len);
+    input_hat=cuda_malloc(batch_size * tgt_len * hidden_size);
     
     launch_layernorm(input,batch_size * tgt_len, hidden_size, input_hat, input_norm, input_mean, input_std, normw, normb);
     cuda_synchronize();
