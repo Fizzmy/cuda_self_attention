@@ -30,7 +30,7 @@ torch_inp_grad, torch_normw_grad, torch_normb_grad, torch_qkv_grad, torch_o_grad
 cuda_inp_grad, cuda_normw_grad, cuda_normb_grad, cuda_qkv_grad, cuda_o_grad = None, None, None, None, None
 
 output = torch.rand((batch_size,tgt_len,head_num,output_size), device = "cuda:0")
-ntest = 1
+ntest = 5
 
 class MultiHeadAttentionLayer(nn.Module):
     
@@ -105,14 +105,8 @@ class MultiHeadFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         # inp, qkv, o = ctx.saved_tensors
-
-        grad = grad_output.clone()
-        input_grad = torch.empty((batch_size,tgt_len,hidden_size), device = "cuda:0")
-        normw_grad = torch.empty((hidden_size), device = "cuda:0")
-        normb_grad = torch.empty((hidden_size), device = "cuda:0")
-        qkv_grad = torch.empty((hidden_size,3*hidden_size), device = "cuda:0")
-        o_grad = torch.empty((hidden_size,hidden_size), device = "cuda:0")
-        cuda_module.torch_launch_multi_head_attention_bw(grad,input_grad,normw_grad,normb_grad,qkv_grad,o_grad)
+        # grad = grad_output.clone()
+        input_grad,normw_grad,normb_grad,qkv_grad,o_grad = cuda_module.torch_launch_multi_head_attention_bw(grad_output.contiguous())
         return (input_grad,normw_grad,normb_grad,qkv_grad,o_grad,None,None,None,None)
 
 class MultiHeadLayer(nn.Module):
@@ -171,15 +165,10 @@ def run_torch():
 
 def run_cuda():
     model = MultiHeadLayer(hidden_size, head_num, qkv, o)
-    inp.grad.data.zero_()
-    if model.qkv.grad!=None:
-        model.qkv.grad.data.zero_()
-    if model.o.grad!=None:
-        model.o.grad.data.zero_()
-    if model.weight.grad!=None:
-        model.weight.grad.data.zero_()
-    if model.bias.grad!=None:
-        model.bias.grad.data.zero_()
+    if inp.grad!=None:
+        inp.grad.data.zero_()
+    model.zero_grad()
+    torch.cuda.empty_cache()
     output = model(inp)
     loss = output.sum()
     print(loss)
@@ -199,13 +188,15 @@ def run_cuda():
 
 if __name__ == '__main__':
 
+    print("Running cuda...")
+    cuda_time , res1 = show_time(run_cuda)
+    print("Cuda time:  {:.3f}us".format(np.mean(cuda_time)))
+    
     print("Running torch...")
     torch_time , res2 = show_time(run_torch)
     print("Torch time:  {:.3f}us".format(np.mean(torch_time)))
     
-    print("Running cuda...")
-    cuda_time , res1 = show_time(run_cuda)
-    print("Cuda time:  {:.3f}us".format(np.mean(cuda_time)))
+    
 
     # print(res1[0])
     np.testing.assert_allclose(res1[0].cpu().detach().numpy(), res2[0].cpu().detach().numpy(), rtol=1)

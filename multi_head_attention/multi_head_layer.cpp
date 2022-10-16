@@ -7,6 +7,27 @@ MultiHeadLayer::MultiHeadLayer(){}
 
 MultiHeadLayer::~MultiHeadLayer(){}
 
+
+int MultiHeadLayer::getBatchSize()
+{
+    return batch_size;
+}
+int MultiHeadLayer::getTgtLen()
+{
+    return tgt_len;
+}
+int MultiHeadLayer::getHeadNum()
+{
+    return head_num;
+}
+int MultiHeadLayer::getHiddenSize()
+{
+    return hidden_size;
+}
+int MultiHeadLayer::getOutputSize()
+{
+    return output_size;
+}
 void MultiHeadLayer::SetConfig(int bs,int tl,int hn,int hs)
 {
     batch_size=bs;

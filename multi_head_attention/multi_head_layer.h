@@ -7,6 +7,11 @@ class MultiHeadLayer{
         void FreeAll();
         void Forward(float* output);
         void Backward(float* grad, float* input_grad,float* normw_grad,float *normb_grad,float* qkv_grad,float* o_grad);
+        int getBatchSize();
+        int getTgtLen();
+        int getHeadNum();
+        int getHiddenSize();
+        int getOutputSize();
     private:
         int batch_size;
         int tgt_len;
