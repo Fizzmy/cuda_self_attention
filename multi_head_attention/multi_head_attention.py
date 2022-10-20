@@ -8,14 +8,14 @@ import time
 from torch.utils.cpp_extension import load
 cuda_module = load(name="multi_head_attention",
                    sources=["multi_head_attention.cpp", "multi_head_attention.cu","multi_head_layer.cpp"],
-                   extra_ldflags=["-lcublas"],
+                   extra_ldflags=["cublas.lib"],
                    verbose=True)
 
 
-batch_size = 32 # 32
-tgt_len = 128 # 128
-head_num = 4 # 4
-hidden_size = 256 # 256
+batch_size = 2 # 32
+tgt_len = 4 # 128
+head_num = 1 # 4
+hidden_size = 4 # 256
 output_size = hidden_size // head_num
 torch.cuda.manual_seed(0)
 torch.set_printoptions(sci_mode=False)
@@ -31,7 +31,7 @@ torch_inp_grad, torch_normw_grad, torch_normb_grad, torch_qkv_grad, torch_o_grad
 cuda_inp_grad, cuda_normw_grad, cuda_normb_grad, cuda_qkv_grad, cuda_o_grad = None, None, None, None, None
 
 output = torch.rand((batch_size,tgt_len,head_num,output_size), device = "cuda:0")
-ntest = 5
+ntest = 1
 
 class MultiHeadAttentionLayer(nn.Module):
     
@@ -68,7 +68,7 @@ class MultiHeadAttentionLayer(nn.Module):
         #计算生成QKV矩阵
         self.QKV = self.QKV_linear(self.input_norm) 
         self.QKV.retain_grad()
-        # print(QKV)
+
         self.QKVT = self.QKV.view(batch_size, tgt_len , 3 ,head_num , hidden_size//head_num ).permute(2,0,3,1,4).contiguous().view(3,-1, tgt_len, output_size)
         self.QKVT.retain_grad()
 

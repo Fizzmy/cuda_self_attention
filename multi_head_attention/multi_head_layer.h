@@ -18,6 +18,6 @@ class MultiHeadLayer{
         int head_num;
         int hidden_size;
         int output_size;
-        float *QKVT,*softmax_output,*attention,*input_norm,*input_mean,*input_std,*input_hat;
+        float *QKVT,*softmax_output,*softmax_T,*input_norm,*input_mean,*input_std,*input_hat;
         float *qkv,*o,*input,*normw,*normb;
 };
