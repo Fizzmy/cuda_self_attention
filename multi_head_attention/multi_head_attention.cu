@@ -7,11 +7,33 @@
 #include <stdexcept>
 #include <math.h>
 #include <stddef.h>
+#include <cublas_v2.h>
 
 #include "multi_head_attention.h"
 #define TILE_WIDTH 32
 #define MAX_THREADS 1024
 #define EPS 1e-8f
+
+void launch_matrixmul(float* c,
+                       float* a,
+                       float* b,
+                 int batch_size, int m , int n , int k, bool trans_A, bool trans_B)
+{
+    //printf("%.3f %.3f\n",a[0],b[0]);
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    const float alpha = 1.0f;
+    const float beta  = 0.0f;
+    if (!trans_A && !trans_B)
+        cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, b, n, n*k, a, k, m*k, &beta, c, n, m*n, batch_size);
+    else if (!trans_A && trans_B)
+        cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, n, m, k, &alpha, b, k, n*k, a, k, m*k, &beta, c, n, m*n, batch_size);
+    else if (trans_A && !trans_B)
+        cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_T, n, m, k, &alpha, b, n, n*k, a, m, m*k, &beta, c, n, m*n, batch_size);
+    else if (trans_A && trans_B)
+        cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_T, n, m, k, &alpha, b, k, n*k, a, m, m*k, &beta, c, n, m*n, batch_size);
+    cublasDestroy(handle);
+}
 __global__ void MatrixMulKernel(float* M,float* N, float* P, int m ,int n, int k)
 {
     __shared__ float ds_M[TILE_WIDTH][TILE_WIDTH];

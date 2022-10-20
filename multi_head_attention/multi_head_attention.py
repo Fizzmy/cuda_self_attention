@@ -3,11 +3,12 @@ import torch.nn as nn
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 import numpy as np
-from torch.utils.cpp_extension import load
 import time
 
+from torch.utils.cpp_extension import load
 cuda_module = load(name="multi_head_attention",
                    sources=["multi_head_attention.cpp", "multi_head_attention.cu","multi_head_layer.cpp"],
+                   extra_ldflags=["-lcublas"],
                    verbose=True)
 
 

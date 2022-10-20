@@ -8,6 +8,11 @@ void launch_matrixmul2(float* c,
                        float* b,
                  int batch_size, int m , int n , int k);
 
+void launch_matrixmul(float* c,
+                       float* a,
+                       float* b,
+                 int batch_size, int m , int n , int k, bool trans_A, bool trans_B);
+
 void launch_matrixT(float *input,float *output,int batch_size,int m,int n);
 void launch_layernorm(float *input,int batch_size,int hidden_size,float *input_hat,float *output,float *input_mean,float *input_std,float *normw,float *normb);
 void launch_layernorm_bw(float *input_grad,int batch_size,int hidden_size,float *input_hat,float *input_mean,float *input_std,float *normw,float *output,float *normw_grad,float *normb_grad);
