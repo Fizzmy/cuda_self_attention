@@ -1,5 +1,3 @@
-
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -8,31 +6,47 @@
 #include <math.h>
 #include <stddef.h>
 #include <cublas_v2.h>
+#include <cuda.h>
+#include <curand_kernel.h>
+#include <curand.h>
 
 #include "multi_head_attention.h"
 #define TILE_WIDTH 32
 #define MAX_THREADS 1024
 #define EPS 1e-8f
 
-void launch_matrixmul(float* c,
+void launch_matrixmul(cublasHandle_t handle,float* c,
                        float* a,
                        float* b,
-                 int batch_size, int m , int n , int k, bool trans_A, bool trans_B)
+                 int batch_size, int m , int n , int k, bool trans_A, bool trans_B, int scaler)
 {
     //printf("%.3f %.3f\n",a[0],b[0]);
-    cublasHandle_t handle;
-    cublasCreate(&handle);
-    const float alpha = 1.0f;
-    const float beta  = 0.0f;
-    if (!trans_A && !trans_B)
-        cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, b, n, n*k, a, k, m*k, &beta, c, n, m*n, batch_size);
-    else if (!trans_A && trans_B)
-        cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, n, m, k, &alpha, b, k, n*k, a, k, m*k, &beta, c, n, m*n, batch_size);
-    else if (trans_A && !trans_B)
-        cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_T, n, m, k, &alpha, b, n, n*k, a, m, m*k, &beta, c, n, m*n, batch_size);
-    else if (trans_A && trans_B)
-        cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_T, n, m, k, &alpha, b, k, n*k, a, m, m*k, &beta, c, n, m*n, batch_size);
-    cublasDestroy(handle);
+    if (scaler==0)
+    {
+        const float alpha = 1.0f;
+        const float beta  = 0.0f;
+        if (!trans_A && !trans_B)
+            cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, b, n, n*k, a, k, m*k, &beta, c, n, m*n, batch_size);
+        else if (!trans_A && trans_B)
+            cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, n, m, k, &alpha, b, k, n*k, a, k, m*k, &beta, c, n, m*n, batch_size);
+        else if (trans_A && !trans_B)
+            cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_T, n, m, k, &alpha, b, n, n*k, a, m, m*k, &beta, c, n, m*n, batch_size);
+        else if (trans_A && trans_B)
+            cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_T, n, m, k, &alpha, b, k, n*k, a, m, m*k, &beta, c, n, m*n, batch_size);
+    }
+    else
+    {
+        const float alpha = sqrt((float)1.0/scaler);
+        const float beta  = 0.0f;
+        if (!trans_A && !trans_B)
+            cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, b, n, n*k, a, k, m*k, &beta, c, n, m*n, batch_size);
+        else if (!trans_A && trans_B)
+            cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, n, m, k, &alpha, b, k, n*k, a, k, m*k, &beta, c, n, m*n, batch_size);
+        else if (trans_A && !trans_B)
+            cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_T, n, m, k, &alpha, b, n, n*k, a, m, m*k, &beta, c, n, m*n, batch_size);
+        else if (trans_A && trans_B)
+            cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_T, n, m, k, &alpha, b, k, n*k, a, m, m*k, &beta, c, n, m*n, batch_size);
+    }
 }
 __global__ void MatrixMulKernel(float* M,float* N, float* P, int m ,int n, int k)
 {
@@ -109,64 +123,6 @@ void launch_matrixT(float *input,float *output,int batch_size,int m,int n) {
     MatrixTKernel<<<grid, block>>>(input,output,m,n);
 }
 
-__global__ void SoftmaxKernel(float *input,int tgt_len,float *output,float scale) // m*n
-{
-    __shared__ float ds[MAX_THREADS];
-
-    int tid = threadIdx.x;
-    int base = blockIdx.x * tgt_len;
-    //int baseInput = ;
-    //int baseOutput = blockIdx.x * m ;
-    float outp;
-    if (tid < tgt_len)
-    {
-        outp = input[ base + tid ] * scale;
-        ds[tid] = outp;
-        //printf("%.3f %.3f\n",scale,input[ base + tid ] * scale);
-    }
-        //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
-    __syncthreads();
-
-    for(int s = blockDim.x/2; s > 0; s>>=1){   
-        if(tid < s && tid + s < tgt_len){
-            if (ds[tid] < ds[tid + s])
-                ds[tid] = ds[tid + s];
-            //printf("%d %.3f\n",s,ds[tid]);
-        }
-        __syncthreads();
-    }
-    
-    float maxn = ds[0];
-    
-    __syncthreads();
-
-    if (tid < tgt_len)
-    {
-        //printf("%f %f %f\n",maxn,expf(input[ base + tid ] * scale - maxn ),ds[tid]);
-        outp = expf(outp-maxn);
-        ds[tid] = outp;
-    }
-        //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
-    __syncthreads();
-
-    for(int s = blockDim.x/2; s > 0; s>>=1){   
-        if(tid < s && tid + s < tgt_len){
-            ds[tid] += ds[tid + s];
-            //printf("%d %.3f\n",s,ds[tid]);
-        }
-        __syncthreads();
-    }
-
-    maxn = ds[0];
-    
-    if (tid < tgt_len)
-    {
-        //printf("%f\n",maxn);
-        output[ base + tid ] = outp/maxn;
-    }
-
-}
-
 __global__ void PrintKernel(float *input,int m,int n,int kk) // m*n
 {
     //__shared__ float ds[TILE_WIDTH][TILE_WIDTH];
@@ -188,13 +144,6 @@ void print(float *c,int batch_size,int m,int n)
     dim3 grid(1);
     dim3 block(1);
     PrintKernel<<<grid, block>>>(c,batch_size,m,n);
-}
-
-void launch_softmax(float *input,int batch_size,int tgt_len,float *output,float scale){
-
-    dim3 grid(batch_size);
-    dim3 block(MAX_THREADS);
-    SoftmaxKernel<<<grid,block>>>(input,tgt_len,output,scale);
 }
 
 __device__ int dim5calc(int id_0,int id_1,int id_2,int id_3,int id_4,int dim_1,int dim_2,int dim_3,int dim_4)
@@ -338,30 +287,171 @@ void launch_transform_021(float *input,int dim_0, int dim_1, int dim_2,float *ou
     Transform021Kernel<<<grid,block>>>(input,dim_2,output);
 }
 
+const unsigned int WARP_REDUCE_MASK = 0xffffffff;
+
+__global__ void SoftmaxKernel(float *input,bool *mask,int tgt_len,float* output,bool is_pre) // m*n
+{
+    int batch = blockIdx.x;
+    int head = blockIdx.y;
+    int len = blockIdx.z;
+    int tid = threadIdx.x;
+    int base = dim4calc(batch, head, len, 0, gridDim.y, gridDim.z , tgt_len);
+    int mask_base = batch * tgt_len;
+    //int baseInput = ;
+    //int baseOutput = blockIdx.x * m ;
+    float val;
+    float outp;
+    //for (int j = 0; j < tgt_len; j++,base+=tgt_len)
+    {
+        outp = -1e9;
+        if (tid < tgt_len)
+        {
+            if (mask [mask_base + tid] == 0)
+            {
+                if (!is_pre || tid <= len) 
+                    outp = input[base + tid];
+            }    
+            //ds[tid] = outp;
+            //printf("%.3f %.3f\n",scale,input[ base + tid ] * scale);
+        }
+        val = outp;
+            //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
+        __syncthreads();
+
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 16, 32));
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 8, 32));
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 4, 32));
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 2, 32));
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 1, 32));
+        __syncthreads();
+        __shared__ float reduce[TILE_WIDTH];
+        if ((tid & 0x1f) == 0)
+        {
+            reduce[tid>>5] = outp;
+        }
+        __syncthreads();
+        if (tid < (blockDim.x>>5))
+            outp = reduce[tid];
+        else
+            outp = -1e9;
+        __syncthreads();
+
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 16, 32));
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 8, 32));
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 4, 32));
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 2, 32));
+        outp = max(outp, __shfl_xor_sync(WARP_REDUCE_MASK, outp, 1, 32));
+        __syncthreads();
+        
+        __shared__ float maxn;
+        if (tid==0)
+            maxn = outp;
+        
+        __syncthreads();
+
+        if (tid < tgt_len)
+        {
+            //printf("%f %f %f\n",maxn,expf(input[ base + tid ] * scale - maxn ),ds[tid]);
+            val = __expf(val-maxn);
+        }
+        else val = 0.0f;
+        outp = val;
+            //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
+        __syncthreads();
+
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 16, 32);
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 8, 32);
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 4, 32);
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 2, 32);
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 1, 32);
+        __syncthreads();
+        if ((tid & 0x1f) == 0)
+        {
+            reduce[tid>>5] = outp;
+        }
+        __syncthreads();
+        if (tid < (blockDim.x>>5))
+            outp = reduce[tid];
+        else
+            outp = 0.0f;
+        __syncthreads();
+
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 16, 32);
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 8, 32);
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 4, 32);
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 2, 32);
+        outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 1, 32);
+        __syncthreads();
+
+        
+        if (tid==0)
+        {
+            maxn = fdividef ( 1.0f , outp);
+        }
+        __syncthreads();
+
+
+        if (tid < tgt_len)
+        {
+            //printf("%f\n",maxn);
+            output[ base + tid ] = val * maxn;
+        }
+    }
+
+}
+
+void launch_softmax(float *input,bool* mask,int batch_size,int head_num,int tgt_len,float *output,bool is_pre)
+{
+    dim3 grid(batch_size,head_num,tgt_len);
+    dim3 block(MAX_THREADS);
+    SoftmaxKernel<<<grid,block>>>(input,mask,tgt_len,output,is_pre);
+}
+
 __global__ void SoftmaxBwKernel(float *input,float *input_grad,int tgt_len,float *output,float scale)
 {
-    __shared__ float ds[MAX_THREADS];
 
     int tid = threadIdx.x;
     int base = blockIdx.x * tgt_len;
     //int baseInput = ;
     //int baseOutput = blockIdx.x * m ;
-    //float outp;
+    float outp=0.0f;
     if (tid < tgt_len)
-        ds[tid] = input[base + tid] * input_grad[base + tid];
+        outp = input[base + tid] * input_grad[base + tid];
         //printf("%d %d %.3f\n",blockIdx.y,tid,ds[tid]);
     __syncthreads();
 
-    for(int s = blockDim.x/2; s > 0; s>>=1){   
-        if(tid < s && tid + s < tgt_len){
-            ds[tid] += ds[tid + s];
-            //printf("%d %.3f\n",s,ds[tid]);
-        }
-        __syncthreads();
+    __shared__ float reduce[TILE_WIDTH];
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 16, 32);
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 8, 32);
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 4, 32);
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 2, 32);
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 1, 32);
+    __syncthreads();
+    if ((tid & 0x1f) == 0)
+    {
+        reduce[tid>>5] = outp;
     }
+    __syncthreads();
+    if (tid < (blockDim.x>>5))
+        outp = reduce[tid];
+    else
+        outp = 0.0f;
+    __syncthreads();
+
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 16, 32);
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 8, 32);
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 4, 32);
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 2, 32);
+    outp += __shfl_xor_sync(WARP_REDUCE_MASK, outp, 1, 32);
+    __syncthreads();
+
+    __shared__ float sum;
+    if (tid==0)
+        sum = outp;
+    __syncthreads();
 
     if (tid<tgt_len)
-        output[base + tid] = scale * input[base + tid] * (input_grad[base + tid] - ds[0]);
+        output[base + tid] = scale * input[base + tid] * (input_grad[base + tid] - sum);
 
 }
 
@@ -497,7 +587,7 @@ __global__ void LayernormBwKernel_input(float *input_grad,float *input_hat,float
     __syncthreads();
     for (int i = tid; i < hidden_size; i += blockDim.x)
     {
-        output[ base + i ] = (input_grad[ base + i ] * normw[ i ] - (tot_yw + input_hat[ base + i ] * tot_ywx) / hidden_size) * input_std[ blockIdx.x ];
+        output[ base + i ] += (input_grad[ base + i ] * normw[ i ] - (tot_yw + input_hat[ base + i ] * tot_ywx) / hidden_size) * input_std[ blockIdx.x ];
     }
 }
 void launch_layernorm_bw(float *input_grad,int batch_size,int hidden_size,float *input_hat,float *input_mean,float *input_std,float *normw,float *output,float *normw_grad,float *normb_grad)
@@ -512,65 +602,101 @@ void launch_layernorm_bw(float *input_grad,int batch_size,int hidden_size,float 
     dim3 block2(MAX_THREADS);
     LayernormBwKernel_input<<<grid2,block2>>>(input_grad,input_hat,input_std,normw,batch_size,hidden_size,output);
 }
-// void launch_multi_head_attention(float* input,float* qkv,float* o,int batch_size,int tgt_len,int head_num,int hidden_size,float* output)
-// {
-//     float *QKV,*QKVT,*softmax_input,*KT,*softmax_output,*softmax_T;
-//     int size = batch_size * tgt_len * hidden_size;
-//     int output_size = hidden_size / head_num;
-//     cudaMalloc((void**)&QKV, 3 * size * sizeof(float));
-//     cudaMalloc((void**)&QKVT, 3 * size * sizeof(float));
-//     cudaMalloc((void**)&softmax_input, batch_size * head_num * tgt_len * tgt_len * sizeof(float));
-//     cudaMalloc((void**)&KT, size * sizeof(float));
 
-//     launch_matrixmul2(QKV,input,qkv,1, batch_size * tgt_len, 3 * hidden_size, hidden_size);
-//     cudaThreadSynchronize();
-    
-    
-//     launch_transform_20314(QKV,batch_size,tgt_len,3,head_num,output_size,QKVT);
-//     cudaThreadSynchronize();
+__global__ void DroupoutKernel(float *input,int tot_size,float *output,bool *mask,float ratio,int seed)
+{
+    int base = blockIdx.x * blockDim.x + threadIdx.x;
+    if (base >= tot_size) return;
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, base, 0, &state);
+    float scale = 1.0f / (1.0f - ratio);
+    bool pos;
+    pos = (curand_uniform(&state) > ratio);
+    mask[base] = pos;
+    output[base] = pos * input[base] * scale;
+}
 
+void launch_dropout(float *input,int batch_size,int hidden_size,float *output,bool *mask,float ratio)
+{
+    dim3 grid((batch_size * hidden_size + MAX_THREADS - 1 )/ MAX_THREADS);
+    dim3 block(MAX_THREADS);
+    //print(input_grad,1,batch_size,hidden_size);
+    //print(input_hat,1,batch_size,hidden_size);
+    DroupoutKernel<<<grid,block>>>(input,batch_size * hidden_size,output,mask,ratio,0);
+}
 
-//     // QKVT : 3  * batch_size * head_num * tgt_len * output_size
-//     float *Q = QKVT;
-//     float *K = QKVT + batch_size * tgt_len * hidden_size;
-//     float *V = QKVT + 2 * batch_size * tgt_len * hidden_size;
+__global__ void DroupoutBwKernel(float *input,int tot_size,float *output,bool *mask,float ratio)
+{
+    int base = blockIdx.x * blockDim.x + threadIdx.x;
+    if (base >= tot_size) return;
+    float scale = 1.0f / (1.0f - ratio);
+    output[base] = mask[base] * input[base] * scale;
+}
 
-//     launch_transform_021(K,batch_size* head_num,tgt_len,output_size,KT);
-//     cudaThreadSynchronize();
+void launch_dropout_bw(float *input,int tot_size,float *output,bool *mask,float ratio)
+{
+    dim3 grid((tot_size + MAX_THREADS - 1 )/ MAX_THREADS);
+    dim3 block(MAX_THREADS);
+    //print(input_grad,1,batch_size,hidden_size);
+    //print(input_hat,1,batch_size,hidden_size);
+    DroupoutBwKernel<<<grid,block>>>(input,tot_size,output,mask,ratio);
+}
 
-//     launch_matrixmul2(softmax_input,Q,KT,batch_size * head_num, tgt_len, tgt_len, output_size);
-//     cudaThreadSynchronize();
-//     cudaFree(KT);
-    
-//     if (tgt_len>1024) throw std::runtime_error("Sequence length greater than 1024 is currently not supported");
-//     cudaMalloc((void**)&softmax_output, batch_size * head_num * tgt_len * tgt_len * sizeof(float));
-//     launch_softmax(softmax_input ,batch_size * head_num * tgt_len , tgt_len, softmax_output, sqrt((float)1.0/output_size));
-//     cudaThreadSynchronize();
-//     cudaFree(softmax_input);
+__global__ void DroupoutResidualKernel(float *input,float *residual,int tot_size,float *output,bool *mask,float ratio,int seed)
+{
+    int base = blockIdx.x * blockDim.x + threadIdx.x;
+    if (base >= tot_size) return;
+    curandStatePhilox4_32_10_t state;
+    curand_init(seed, base, 0, &state);
+    float scale = 1.0f / (1.0f - ratio);
+    bool pos;
+    pos = (curand_uniform(&state) > ratio);
+    mask[base] = pos;
+    output[base] = pos * input[base] * scale + residual[base];
+}
 
-//     launch_matrixmul2(output,softmax_output,V,batch_size * head_num, tgt_len, output_size, tgt_len);
-//     cudaThreadSynchronize();
-//     cudaFree(QKVT);
+void launch_dropout_res(float *input, float *residual, int tot_size, float *output,bool *mask,float ratio)
+{
+    dim3 grid((tot_size + MAX_THREADS - 1 )/ MAX_THREADS);
+    dim3 block(MAX_THREADS);
+    //print(input_grad,1,batch_size,hidden_size);
+    //print(input_hat,1,batch_size,hidden_size);
+    DroupoutResidualKernel<<<grid,block>>>(input,residual,tot_size,output,mask,ratio,0);
+}
 
-//     // print(output , batch_size *head_num, tgt_len , output_size);
-//     // cudaThreadSynchronize();
-   
-//     cudaMalloc((void**)&softmax_T, batch_size * tgt_len * hidden_size * sizeof(float));
-//     launch_transform_0213(output,batch_size,head_num,tgt_len,output_size,softmax_T);
-//     cudaThreadSynchronize();
+__global__ void DroupoutResidualBwKernel(float *output_grad, bool *mask, int tot_size, float *output,float *input_grad, float ratio)
+{
+    int base = blockIdx.x * blockDim.x + threadIdx.x;
+    if (base >= tot_size) return;
 
-    
-    
-//     launch_matrixmul2(output,softmax_T,o,1,batch_size * tgt_len, hidden_size,  hidden_size);
-//     cudaThreadSynchronize();
-//     cudaFree(softmax_T);
-// }
+    float scale = 1.0f / (1.0f - ratio);
+    output[base] = mask[base] * output_grad[base] * scale;
+    input_grad[base] = output_grad[base];
+}
+
+void launch_dropout_res_bw(float *output_grad, bool *mask, int tot_size, float *output,float *input_grad,float ratio)
+{
+    dim3 grid((tot_size + MAX_THREADS - 1 )/ MAX_THREADS);
+    dim3 block(MAX_THREADS);
+    //print(input_grad,1,batch_size,hidden_size);
+    //print(input_hat,1,batch_size,hidden_size);
+    DroupoutResidualBwKernel<<<grid,block>>>(output_grad, mask, tot_size, output, input_grad, ratio);
+}
+
 
 float *cuda_malloc(size_t ele_num)
 {
     size_t byte_size = ele_num * sizeof(float);
     float *a = NULL;    
     cudaMalloc((void**)&a, byte_size * sizeof(float));
+    return a;
+}
+
+bool *cuda_malloc2(size_t ele_num)
+{
+    size_t byte_size = ele_num * sizeof(bool);
+    bool *a = NULL;    
+    cudaMalloc((void**)&a, byte_size * sizeof(bool));
     return a;
 }
 
